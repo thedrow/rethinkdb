@@ -10,11 +10,11 @@ import gevent.socket as socket
 from gevent.event import Event, AsyncResult
 from gevent.lock import Semaphore
 
-from . import ql2_pb2 as p
-from .net import decodeUTF, Query, Response, Cursor, maybe_profile
-from .net import Connection as ConnectionBase
-from .errors import *
-from .ast import RqlQuery, RqlTopLevelQuery, DB
+from drivers.python.rethinkdb import ql2_pb2 as p
+from drivers.python.rethinkdb.net import decodeUTF, Query, Response, Cursor, maybe_profile, convert_pseudo
+from drivers.python.rethinkdb.net import Connection as ConnectionBase
+from drivers.python.rethinkdb.errors import *
+from drivers.python.rethinkdb.ast import RqlQuery, RqlTopLevelQuery, DB
 
 __all__ = ['Connection']
 
@@ -22,25 +22,11 @@ pResponse = p.Response.ResponseType
 pQuery = p.Query.QueryType
 
 
-class GeventCursorEmpty(ReqlCursorEmpty, StopIteration):
-    def __init__(self):
-        super(GeventCursorEmpty, self).__init__()
-
-
 # TODO: allow users to set sync/async?
 class GeventCursor(Cursor):
     def __init__(self, *args, **kwargs):
         Cursor.__init__(self, *args, **kwargs)
         self.new_response = Event()
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self._get_next(None)
-
-    def _empty_error(self):
-        return GeventCursorEmpty()
 
     def _extend(self, res):
         Cursor._extend(self, res)
@@ -54,8 +40,7 @@ class GeventCursor(Cursor):
                 if self.error is not None:
                     raise self.error
                 self.new_response.wait()
-            return self.items.popleft()
-
+            return convert_pseudo(self.items.pop(0), self.query)
 
 # TODO: would be nice to share this code with net.py
 class SocketWrapper(object):
@@ -64,27 +49,10 @@ class SocketWrapper(object):
         self.port = parent._parent.port
         self._read_buffer = None
         self._socket = None
-        self.ssl = parent._parent.ssl
 
         try:
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-            self._socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             self._socket.connect((self.host, self.port))
-
-            if len(self.ssl) > 0:
-                ssl_context = self._get_ssl_context(self.ssl["ca_certs"])
-                try:
-                    self._socket = ssl_context.wrap_socket(self._socket,
-                                                           server_hostname=self.host)
-                except IOError as exc:
-                    self._socket.close()
-                    raise ReqlDriverError("SSL handshake failed: %s" % (str(exc),))
-                try:
-                    match_hostname(self._socket.getpeercert(), hostname=self.host)
-                except CertificateError:
-                    self._socket.close()
-                    raise
 
             self.sendall(parent._parent.handshake)
 
@@ -95,29 +63,22 @@ class SocketWrapper(object):
                 if char == b'\0':
                     break
                 response += char
-        except ReqlAuthError:
-            raise
-        except ReqlTimeoutError:
-            raise
-        except ReqlDriverError as ex:
+        except RqlDriverError as ex:
             self.close()
             error = str(ex)\
                 .replace('receiving from', 'during handshake with')\
                 .replace('sending to', 'during handshake with')
-            raise ReqlDriverError(error)
+            raise RqlDriverError(error)
         except Exception as ex:
             self.close()
-            raise ReqlDriverError("Could not connect to %s:%s. Error: %s" %
-                                  (self.host, self.port, ex))
+            raise RqlDriverError("Could not connect to %s:%s. Error: %s" %
+                                 (self.host, self.port, ex))
 
         if response != b"SUCCESS":
             self.close()
-            message = decodeUTF(response).strip()
-            if message == "ERROR: Incorrect authorization key.":
-                raise ReqlAuthError(self.host, self.port)
-            else:
-                raise ReqlDriverError("Server dropped connection with message: \"%s\"" %
-                                      (message, ))
+            raise RqlDriverError(("Server dropped connection " +
+                                  "with message: \"%s\"") %
+                                 decodeUTF(response).strip())
 
     def is_open(self):
         return self._socket is not None
@@ -139,27 +100,25 @@ class SocketWrapper(object):
                 try:
                     chunk = self._socket.recv(length - len(res))
                     break
-                except ReqlTimeoutError:
-                    raise
                 except IOError as ex:
                     if ex.errno == errno.ECONNRESET:
                         self.close()
-                        raise ReqlDriverError("Connection is closed.")
+                        raise RqlDriverError("Connection is closed.")
                     elif ex.errno != errno.EINTR:
                         self.close()
-                        raise ReqlDriverError(('Connection interrupted ' +
+                        raise RqlDriverError(('Connection interrupted ' +
                                               'receiving from %s:%s - %s') %
                                              (self.host, self.port, str(ex)))
                 except Exception as ex:
                     self.close()
-                    raise ReqlDriverError('Error receiving from %s:%s - %s' %
+                    raise RqlDriverError('Error receiving from %s:%s - %s' %
                                          (self.host, self.port, str(ex)))
                 except:
                     self.close()
                     raise
             if len(chunk) == 0:
                 self.close()
-                raise ReqlDriverError("Connection is closed.")
+                raise RqlDriverError("Connection is closed.")
             res += chunk
         return res
 
@@ -171,30 +130,19 @@ class SocketWrapper(object):
             except IOError as ex:
                 if ex.errno == errno.ECONNRESET:
                     self.close()
-                    raise ReqlDriverError("Connection is closed.")
+                    raise RqlDriverError("Connection is closed.")
                 elif ex.errno != errno.EINTR:
                     self.close()
-                    raise ReqlDriverError(('Connection interrupted ' +
+                    raise RqlDriverError(('Connection interrupted ' +
                                           'sending to %s:%s - %s') %
                                          (self.host, self.port, str(ex)))
             except Exception as ex:
                 self.close()
-                raise ReqlDriverError('Error sending to %s:%s - %s' %
+                raise RqlDriverError('Error sending to %s:%s - %s' %
                                      (self.host, self.port, str(ex)))
             except:
                 self.close()
                 raise
-
-    def _get_ssl_context(self, ca_certs):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
-        if hasattr(ctx, "options"):
-            ctx.options |= getattr(ssl, "OP_NO_SSLv2", 0)
-            ctx.options |= getattr(ssl, "OP_NO_SSLv3", 0)
-
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.check_hostname = True
-        ctx.load_verify_locations(ca_certs)
-        return ctx
 
 class ConnectionInstance(object):
     def __init__(self, parent, io_loop=None):
@@ -207,7 +155,7 @@ class ConnectionInstance(object):
         self._socket = None
 
     def connect(self, timeout):
-        with gevent.Timeout(timeout, RqlTimeoutError(self._parent.host, self._parent.port)) as timeout:
+        with gevent.Timeout(timeout, RqlTimeoutError()) as timeout:
             self._socket = SocketWrapper(self)
 
         # Start a parallel coroutine to perform reads
@@ -248,7 +196,7 @@ class ConnectionInstance(object):
         self._write_mutex.acquire()
         
         try:
-            self._socket.sendall(query.serialize(self._parent._get_json_encoder(query)))
+            self._socket.sendall(query.serialize())
         finally:    
             self._write_mutex.release()
 
@@ -270,20 +218,23 @@ class ConnectionInstance(object):
                 buf = self._socket.recvall(12)
                 (token, length,) = struct.unpack("<qL", buf)
                 buf = self._socket.recvall(length)
+                res = Response(token, buf)
 
                 cursor = self._cursor_cache.get(token)
                 if cursor is not None:
-                    cursor._extend(buf)
+                    cursor._extend(res)
                 elif token in self._user_queries:
                     # Do not pop the query from the dict until later, so
                     # we don't lose track of it in case of an exception
                     query, async_res = self._user_queries[token]
-                    res = Response(token, buf, self._parent._get_json_decoder(query))
                     if res.type == pResponse.SUCCESS_ATOM:
-                        async_res.set(maybe_profile(res.data[0], res))
+                        value = convert_pseudo(res.data[0], query)
+                        async_res.set(maybe_profile(value, res))
                     elif res.type in (pResponse.SUCCESS_SEQUENCE,
                                       pResponse.SUCCESS_PARTIAL):
-                        cursor = GeventCursor(self, query, res)
+                        cursor = GeventCursor(self, query)
+                        self._cursor_cache[token] = cursor
+                        cursor._extend(res)
                         async_res.set(maybe_profile(cursor, res))
                     elif res.type == pResponse.WAIT_COMPLETE:
                         async_res.set(None)
