@@ -17,8 +17,7 @@ creating and destroying that "machinery" in a generic way. Subclasses should def
 own subclass of `cfeed_artificial_table_backend_t::machinery_t` that subscribes to
 notifications and calls `send_all_change()` and `send_all_stop()` as necessary. */
 
-class cfeed_artificial_table_backend_t :
-    public artificial_table_backend_t {
+class cfeed_artificial_table_backend_t : public artificial_table_backend_t {
 public:
     bool read_changes(
         ql::env_t *env,

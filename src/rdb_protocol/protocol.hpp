@@ -546,6 +546,8 @@ struct write_response_t {
 };
 RDB_DECLARE_SERIALIZABLE_FOR_CLUSTER(write_response_t);
 
+
+
 struct batched_replace_t {
     batched_replace_t() { }
     batched_replace_t(
@@ -553,9 +555,11 @@ struct batched_replace_t {
             const std::string &_pkey,
             const counted_t<const ql::func_t> &func,
             ql::global_optargs_t _optargs,
+            return_write_stamps_t _return_write_stamps,
             return_changes_t _return_changes)
         : keys(std::move(_keys)), pkey(_pkey), f(func),
           optargs(std::move(_optargs)),
+          return_write_stamps(_return_write_stamps),
           return_changes(_return_changes) {
         r_sanity_check(keys.size() != 0);
     }
@@ -563,6 +567,7 @@ struct batched_replace_t {
     std::string pkey;
     ql::wire_func_t f;
     ql::global_optargs_t optargs;
+    return_write_stamps_t return_write_stamps;
     return_changes_t return_changes;
 };
 RDB_DECLARE_SERIALIZABLE_FOR_CLUSTER(batched_replace_t);
@@ -570,12 +575,17 @@ RDB_DECLARE_SERIALIZABLE_FOR_CLUSTER(batched_replace_t);
 struct batched_insert_t {
     batched_insert_t() { }
     batched_insert_t(
-            std::vector<ql::datum_t> &&_inserts,
-            const std::string &_pkey, conflict_behavior_t _conflict_behavior,
-            const ql::configured_limits_t &_limits,
-            return_changes_t _return_changes)
-        : inserts(std::move(_inserts)), pkey(_pkey),
-          conflict_behavior(_conflict_behavior), limits(_limits),
+        std::vector<ql::datum_t> &&_inserts,
+        const std::string &_pkey,
+        conflict_behavior_t _conflict_behavior,
+        const ql::configured_limits_t &_limits,
+        return_write_stamps_t _return_write_stamps,
+        return_changes_t _return_changes)
+        : inserts(std::move(_inserts)),
+          pkey(_pkey),
+          conflict_behavior(_conflict_behavior),
+          limits(_limits),
+          return_write_stamps(_return_write_stamps),
           return_changes(_return_changes) {
         r_sanity_check(inserts.size() != 0);
 #ifndef NDEBUG
@@ -600,6 +610,7 @@ struct batched_insert_t {
     std::string pkey;
     conflict_behavior_t conflict_behavior;
     ql::configured_limits_t limits;
+    return_write_stamps_t return_write_stamps;
     return_changes_t return_changes;
 };
 RDB_DECLARE_SERIALIZABLE_FOR_CLUSTER(batched_insert_t);
