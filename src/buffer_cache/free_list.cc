@@ -29,8 +29,7 @@ block_id_t free_list_t::acquire_block_id() {
         ++next_new_block_id_;
         return ret;
     } else {
-        block_id_t ret = free_ids_.back();
-        free_ids_.pop_back();
+        block_id_t ret = free_ids_.pop_back();
         return ret;
     }
 }
@@ -41,8 +40,7 @@ block_id_t free_list_t::acquire_aux_block_id() {
         ++next_new_aux_block_id_;
         return ret;
     } else {
-        block_id_t ret = free_aux_ids_.back();
-        free_aux_ids_.pop_back();
+        block_id_t ret = free_aux_ids_.pop_back();
         return ret;
     }
 }
@@ -63,8 +61,7 @@ void free_list_t::acquire_chosen_block_id(block_id_t block_id) {
     } else {
         for (size_t i = 0, e = free_ids->size(); i < e; ++i) {
             if ((*free_ids)[i] == block_id) {
-                (*free_ids)[i] = free_ids->back();
-                free_ids->pop_back();
+                (*free_ids)[i] = free_ids->pop_back();
                 return;
             }
         }
